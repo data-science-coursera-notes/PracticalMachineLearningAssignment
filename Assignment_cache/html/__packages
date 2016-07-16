@@ -1,0 +1,13 @@
+base
+DT
+lattice
+ggplot2
+caret
+foreach
+iterators
+doParallel
+randomForest
+survival
+gbm
+plyr
+rpart

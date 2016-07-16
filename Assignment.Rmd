@@ -1,0 +1,361 @@
+---
+title: "Practical Machine Learning Assignment"
+author: "Chan Chee-Foong"
+date: "July 15, 2016"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if(!is.element('DT', installed.packages()[,1])) {
+    install.packages('DT')
+}
+
+if(!is.element('caret', installed.packages()[,1])) {
+    install.packages('caret')
+}
+
+library(DT)
+library(caret)
+
+set.seed(3567)
+
+```
+
+## Executive Summary
+
+The objective of this assignment is to build a prediction model to quantify how well an individual performs doing a weight lifting exercise.
+
+Specifically, we will use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. During the data collection exercise, they were asked to perform barbell lifts correctly and incorrectly in 5 different ways.  Each paricipant was asked to do one set of 10 repetitions in five different fashions:  exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).  Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. 
+
+More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).  Special thanks to them for allowing their data to be used in this assignment.
+
+***
+## Configure parallel processing
+
+To improve the performance of machine learning models, caret supports the parallel processing capabilities of the parallel package.
+
+``` {r install, echo = FALSE, results = "hide", warning = FALSE, message = FALSE}
+
+if(!is.element('parallel', installed.packages()[,1])) {
+    install.packages('parallel')
+}
+
+if(!is.element('doParallel', installed.packages()[,1])) {
+    install.packages("doParallel", dependencies=TRUE)
+}
+```
+
+``` {r parallel, results = "hide", warning = FALSE, message = FALSE}
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 2) # Running on an 8 core computer.  Leaving 2 cores for OS
+registerDoParallel(cluster)
+```
+
+***
+## Data Preprocessing and Feature Selection
+
+```{r data, cache=TRUE, warning = FALSE, message = FALSE, echo=FALSE}
+## Data Extraction
+
+setwd("C:/Users/Win7/Dropbox/GitHub/PracticalMachineLearningAssignment")
+datadir <- "./data"
+trainfile <- "pml-training.csv"
+testfile <- "pml-testing.csv"
+
+traindirfile <- paste(datadir, trainfile, sep="/")
+testdirfile <- paste(datadir, testfile, sep="/")
+
+if (!file.exists(traindirfile)) {
+    if (!file.exists(datadir)) {dir.create(datadir)}
+    fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+    download.file(fileUrl, destfile=traindirfile)
+}
+
+if (!file.exists(testdirfile)) {
+    if (!file.exists(datadir)) {dir.create(datadir)}
+    fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+    download.file(fileUrl, destfile=testdirfile)
+}
+
+training <- read.csv(traindirfile, na.strings = "#DIV/0!")
+testing <- read.csv(testdirfile)
+```
+
+The training data for this project are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>.  The test data for the course prediction quiz are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+
+### Summary of the data sets
+
+Data Set | Number of Observations | Number of Variables | Remarks
+---------|----------------|-----------------|-----------------------
+Training | 19622          | 160 (159 Predictors, 1 Outcome) | Outcome Column Name: classe
+Test     | 20             | 160                             | For prediction quiz.  Column not in training set: problem_id
+
+For feature selection, it make sense to focus on predictors available in the testing set as it will be these predictors that will be used by machine learning models for prediction and classification.  Predictors that are available in the testing set but not in the training set or vice versa are useless predictors.  So in this data pre-processsing exercise, we will perform a first level elimination of predictors from the training set by focusing our data analysis on the testing set.
+
+``` {r select, cache=TRUE, warning = FALSE, message = FALSE}
+# Extracting the full list of predictors available on the test data set
+selectFeature <- data.frame(feature = colnames(training))
+selectFeature <- cbind(row = row(selectFeature), selectFeature)
+# To begin, classify all predictors as not required
+selectFeature$required <- FALSE
+```
+
+
+### Removal of Zero- and Near Zero-Variance Predictors
+
+We seek to identify near zero-variance variables in the testing set.  These near-zero-variance predictors may have undue influence on the models and may need to be identified and eliminated prior to modeling.
+
+```{r Zero, cache=FALSE, warning = FALSE, message = FALSE}
+# Identifying the Zero Covariates
+nearZeroVar <- nearZeroVar(testing, saveMetrics = TRUE)
+nearZeroVar <- cbind(name = rownames(nearZeroVar),rownum = 1:nrow(nearZeroVar),nearZeroVar)
+rownames(nearZeroVar) <- 1:nrow(nearZeroVar)
+
+# Separate the Zero and Non-Zero Covariates
+nonZeroVarFeature <- subset(nearZeroVar, nzv==FALSE)
+ZeroVarFeature <- subset(nearZeroVar, nzv==TRUE)
+
+# Show the Zero Covariates
+datatable(ZeroVarFeature,
+           options = list(pageLength = 5), 
+           caption = 'Near-Zero-Variance Predictors')
+
+# Set the Non-Zero Covariates as Required
+selectFeature[nonZeroVarFeature$rownum,'required'] <- TRUE
+
+```
+
+
+### Removal of Irrelavant Predictors
+
+The first seven columns in respective datasets are identification variables recording information about the participants, start/end time of each exercise windows, etc.  Data in these columns are will be elimated from the machine learning model as these are event specific information and not to be used for predictions on the test set.
+
+``` {r irrelvant, cache=TRUE, warning = FALSE, message = FALSE}
+# First 7 columns of testing data set
+colnames(testing[,1:7])
+selectFeature[c(1:7),'required'] <- FALSE
+```
+
+
+### Removal of Highly Correlated Predictors
+
+After eliminating predictors that have near zero variance and irrelevant, we have reduced the number of predictors from 159 to 52.  
+
+Many models perform better when highly correlated predictors are removed.  We will study the correlation matrix on the remaining 52 predictors and remove predictors that have correlation > 0.9 using the caret::findCorrelation function.  To find the highest correlation of the predictors, we will use the training data set.  This is because the training data set contains much more observations than the test data set.
+
+``` {r highcor, cache=TRUE, warning = FALSE, message = FALSE}
+# Removing columns from the 2 data sets that are not required up to this point
+training2 <- training[,selectFeature[selectFeature$required == TRUE,'row']]
+testing2 <- testing[,selectFeature[selectFeature$required == TRUE,'row']]
+
+# Calculate correlation matrix on the training dataset
+correlationMatrix <- cor(training2[,1:52])
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.9, 
+                                    name = FALSE, exact = ncol(correlationMatrix) < 100)
+
+# Removing the highly correlated predictors on both dataset
+trainset <- training2[,-c(highlyCorrelated)]
+testset <- testing2[,-c(highlyCorrelated)]
+
+```
+
+***
+## Data Slicing
+
+The final training set with 45 predictors and 1 outcome is now ready for machine learning model building.  We will perform a data split on the training data set with a single 80/20% split.  The larger data set to train the model and the smaller data set to validate the final model.
+
+``` {r Data Split, cache=TRUE, warning = FALSE, message = FALSE}
+# Data splitting the training set into 2 subset.  
+# One for training the model.  One for out of sample model validation.
+inTrain <- createDataPartition(y=trainset$classe,p=0.80, list=FALSE)
+trainset <- trainset[inTrain,]
+validationtest <- trainset[-inTrain,]
+```
+
+***
+## Cross Validation and Model Training/Tuning
+
+A total of 4 machine learning models will be used to train and develop the prediction algorithm.  As the prediction type is classification (5 classes: A, B, C, D, E), the following models are used:
+
+1) Random Forest (rf)
+2) Stochastic Gradient Boosting (gbm)
+3) Classification and Regression Trees - CART (rpart)
+4) Recursive Feature Elimination (rfe)
+
+While we use 5-fold cross validation to generate sub-training/test sets for training rf, gbm and rfe models, 10 repeated 10-fold cross validation will be used to train rpart model.  These cross validation settings are selected based on the shorter time required to train each model without compromising model accuracy.  The setting is passed in as parameters via the trainControl or rfeControl functions depending on models.
+
+### 1. using Random Forest (rf)
+
+Tuning of the random forest model is done by running mtry (number of variables randomly sampled as candidates at each split) from 1 to 15 using tuneGrid.  Number of trees to grow is fixed at a constant of 500.
+
+``` {r RF, cache=TRUE, warning = FALSE, message = FALSE}
+### Random Forest
+set.seed(3567)
+
+## 5-fold CV repeated 5 times
+train_control <- trainControl(method = "cv", number = 5, search='grid')
+metric <- "Accuracy"
+
+## Tune with 15 mtry
+tunegrid <- expand.grid(.mtry=c(1:15))
+
+rfmodel <- train(classe~., data=trainset, method="rf", 
+                 metric=metric, tuneGrid=tunegrid, trControl=train_control, ntree=500)
+
+# Model summary
+print(rfmodel)
+```
+
+As seen from the training results above, mtry = 10 gives the best accuracy of 99.32%.  Below shows the chart plotting mtry against accuracy.  mtry = 10 shows the highest point on the chart.
+
+``` {r}
+# Plotting the model
+plot(rfmodel)
+```
+
+### 2. using Stochastic Gradient Boosting (gbm)
+
+Tuning of the gbm model is done by running interaction.depth of 1, 5 and 9 and n.trees of 100, 200 and 300.  These are configure in a grid and passed into tuneGrid.  Shrinkage and n.minobsinnode are set to 0.1 and 10 respectively.
+
+``` {r GBM, cache=TRUE, warning = FALSE, message = FALSE}
+### Stochastic Gradient Boosting
+set.seed(3567)
+
+## 5-fold CV repeated 5 times
+train_control <- trainControl(method = "cv", number = 5)
+
+## Tune with interaction depth of 1, 5, 9 and number of trees of 100, 200, 300
+gbmGrid <- expand.grid(interaction.depth = c(1, 5, 9), n.trees = c(100,200,300), 
+                       shrinkage = 0.1, n.minobsinnode = 10)
+
+# Train the model
+gbmmodel <- train(classe~., data=trainset, method="gbm", trControl=train_control, 
+                  verbose = FALSE, tuneGrid = gbmGrid)
+
+# Model summary
+print(gbmmodel)
+```
+
+From the training results shown above, the model when interactive.depth = 9 and n.trees = 300 gives the best accuracy at 99.29%.  
+
+### 3. using Classification and Regression Trees - CART (rpart)
+
+Tuning of the rpart model is done by running cp from 0 to 0.1 in steps of 0.005.  These are configured in a grid and passed into tuneGrid.
+
+``` {r CART, cache=TRUE, warning = FALSE, message = FALSE}
+# Classification and Regression Trees (CART)
+set.seed(3567)
+ 
+## 10-fold CV repeated 10 times
+train_control <- trainControl(method="repeatedcv", number = 10, repeats = 10)
+
+rpGrid <- expand.grid(cp = seq(0,0.1, by=0.005))
+
+# Train the model
+rpmodel <- train(classe~., data=trainset, method="rpart", trControl=train_control, 
+                 tuneLength=20, tuneGrid = rpGrid)
+
+# Model summary
+print(rpmodel)
+```
+
+The training results show that for the rpart model, the best accuracy of 92.76% comes from the model when cp = 0.
+
+### 4. using Recursive Feature Elimination (rfe)
+
+Using Recursive Feature Elimination (RFE) method provided by caret R package, we tune the model by selecting the best feature (predictor) auotmatically.  A random forest algorithm will be used on each iteration to evaluate the model.  
+
+``` {r RFE, cache=TRUE, warning = FALSE, message = FALSE}
+set.seed(3567)
+
+# RFE Model Training and Tuning
+# Define the control using a random forest selection function.  Using 5-fold Cross Validation
+control <- rfeControl(functions=rfFuncs, method="cv", number=5)
+
+# Train the model
+rfemodel <- rfe(trainset[,1:45], trainset[,46], sizes=c(1:45), rfeControl=control)
+
+# Model summary
+print(rfemodel)
+```
+
+Note that the alogrithm is configured to explore all possible subsets of the 45 predictors.  By plotting the results, we show the accuracy of the different predictors subset size.  With 42 predictors, the accuracy is highest at 99.32%.  Hence, we should expect the out of sample error to be small, the model prediction should be highly accurate.
+
+```{r plotting results, cache=TRUE, warning = FALSE, message = FALSE}
+# Plotting the results
+plot(rfemodel, type=c("g", "o"))
+```
+
+***
+## Model Validation
+
+We use the validation data set as an out of sample set to validate all the 4 models and assess their accuracy.  The confusion matrices confirm that prediction accuracy of the models.  
+
+```{r validation, cache=TRUE, warning = FALSE, message = FALSE}
+# Predicting the validation data set
+rfValidation <- predict(rfmodel,validationtest)  ## Random Forest Validation
+gbmValidation <- predict(gbmmodel,validationtest)  ## Stochastic Gradient Boosting Validation
+rpValidation <- predict(rpmodel,validationtest)  ## CART Validation
+rfeValidation <- predict(rfemodel$fit,validationtest)  ## Recursive Feature Elimination Validation
+
+# Output the confusion matrix of the prediction and the validation outcome
+confusionMatrix(validationtest$classe, rfValidation)$table  ## Random Forest Confusion Matrix
+confusionMatrix(validationtest$classe, gbmValidation)$table  ## Stochastic Gradient Boosting Confusion Matrix
+confusionMatrix(validationtest$classe, rpValidation)$table  ## CART Confusion Matrix
+confusionMatrix(validationtest$classe, rfeValidation)$table  ## Recursive Feature Elimination Confusion Matrix
+
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+
+# Accuracy of the 4 models on the validation data set
+accuracy <- data.frame(cbind(RF = percent(confusionMatrix(validationtest$classe, rfValidation)$overall[1]),
+                  GBM = percent(confusionMatrix(validationtest$classe, gbmValidation)$overall[1]),
+                  CART = percent(confusionMatrix(validationtest$classe, rpValidation)$overall[1]),
+                  RFE = percent(confusionMatrix(validationtest$classe, rfeValidation)$overall[1])), 
+                  row.names = 'Accuracy')
+
+accuracy
+```
+
+We can see all the models except CART give 100% accuracy to the out of the sample validation data set.  CART gives an accuracy of 95.85%.  Which also means that from a test set with 20 observations, there is a chance that 1 observations may be predicted incorrectly.
+
+
+***
+## Model Prediction
+
+Using all the 4 models to predict the 20 different test cases in this assignment, the results can be seen below.  We observed that the predictions are consistent across all model except for prediction 6 by the CART model.  CART model predicted 'C' while the rest predicted 'E'.  Nevertheless, we will proceed to submission our prediction generated from the RF model as the model summary shows highest accuracy level.
+
+```{r prediction, cache=TRUE, warning = FALSE, message = FALSE}
+# Predicting the test data set
+prediction <- data.frame(RF = predict(rfmodel,testset),   # Random Forest Prediction
+                    GBM = predict(gbmmodel,testset),      # Stochastic Gradient Boosting Prediction
+                    CART = predict(rpmodel,testset),      # CART Prediction
+                    RFE = predict(rfemodel$fit,testset))  # Recursive Feature Elimination Prediction
+
+prediction <- data.frame(t(prediction))
+colnames(prediction) <- 1:20
+
+# Prediction results by the 4 models
+prediction
+
+# The results to be submitted in the project quiz
+predict(rfmodel,testset)
+```
+
+Submission of the prediction results to the Course Project Prediction Quiz has been given a perfect score of 20/20.
+
+***
+## Conclusion
+With the right selection of features, models, parameters and tuning techniques, it is possible to train any models with high accuracy.  Good understanding of the training and test data set will pave the way to a more effective and error free model training exercise, enhancing prediciton accuracy in the shortest possible time with the least computing power.
+
+
+``` {r close parallel, echo = FALSE, results = "hide", warning = FALSE, message = FALSE}
+stopCluster(cluster)
+```
