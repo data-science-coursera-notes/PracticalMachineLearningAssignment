@@ -33,6 +33,9 @@ Specifically, we will use data from accelerometers on the belt, forearm, arm, an
 
 More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).  Special thanks to them for allowing their data to be used in this assignment.
 
+A total of 4 machine learning models are built and trained.  With good features and parameters selection, 3 of the models are tuned to predict with 100% accuracy on an out of sample data set.  Final prediction on the testing data set scored 20/20.
+
+
 ***
 ## Configure parallel processing
 
