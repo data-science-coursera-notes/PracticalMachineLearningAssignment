@@ -417,7 +417,7 @@ print(rfemodel)
 ##    yaw_belt, magnet_dumbbell_z, pitch_belt, magnet_dumbbell_y, pitch_forearm
 ```
 
-Note that the alogrithm is configured to explore all possible subsets of the 45 predictors.  By plotting the results, we show the accuracy of the different predictors subset size.  With 42 predictors, the accuracy is highest at 99.32%.  Hence, we should expect the out of sample error to be small, the model prediction should be highly accurate.
+Note that the alogrithm is configured to explore all possible subsets of the 45 predictors.  By plotting the results, we show the accuracy of the different predictors subset size.  With 43 predictors, the accuracy is highest at 99.32%.  Hence, we should expect the out of sample error to be small, the model prediction should be highly accurate.
 
 
 ```r
